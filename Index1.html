@@ -1,0 +1,1326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#111827" media="(prefers-color-scheme: dark)">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Finder App</title>
+    
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then((reg) => console.log('Service Worker registered!', reg.scope))
+                    .catch((err) => console.log('Service Worker registration failed:', err));
+            });
+        }
+    </script>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        gray: {
+                            850: '#1f2937',
+                            900: '#111827',
+                            950: '#030712',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        body { -webkit-tap-highlight-color: transparent; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .animate-fade { animation: fadeIn 0.3s ease-in-out; }
+        .toggle-checkbox:checked { right: 0; border-color: #3b82f6; }
+        .toggle-checkbox:checked + .toggle-label { background-color: #3b82f6; }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 transition-colors duration-300">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- IndexedDB Helper (RESTORED for unlimited storage) ---
+        const DB_NAME = 'FinderDB';
+        const DB_VERSION = 1;
+        const STORE_NAME = 'items';
+
+        const dbHelper = {
+            open: () => {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(DB_NAME, DB_VERSION);
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains(STORE_NAME)) {
+                            db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+                        }
+                    };
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            getAll: async () => {
+                const db = await dbHelper.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(STORE_NAME, 'readonly');
+                    const store = tx.objectStore(STORE_NAME);
+                    const request = store.getAll();
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            saveAll: async (items) => {
+                const db = await dbHelper.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(STORE_NAME, 'readwrite');
+                    const store = tx.objectStore(STORE_NAME);
+                    const clearReq = store.clear(); 
+                    clearReq.onsuccess = () => {
+                        items.forEach(item => store.put(item));
+                    };
+                    tx.oncomplete = () => resolve();
+                    tx.onerror = () => reject(tx.error);
+                });
+            },
+            clear: async () => {
+                const db = await dbHelper.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(STORE_NAME, 'readwrite');
+                    const store = tx.objectStore(STORE_NAME);
+                    const request = store.clear();
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                });
+            }
+        };
+
+        // Utility: Compress Image
+        const compressImage = (file) => {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 600;
+                        const scaleSize = MAX_WIDTH / img.width;
+                        canvas.width = MAX_WIDTH;
+                        canvas.height = img.height * scaleSize;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.7));
+                    };
+                };
+            });
+        };
+
+        // Utility: Read File as Base64
+        const readFileAsBase64 = (file) => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = error => reject(error);
+            });
+        };
+
+        // Utility: Convert Base64 to File Object
+        const dataURLtoFile = (dataurl, filename) => {
+            let arr = dataurl.split(','), mime = arr[0].match(/:(.*?);/)[1],
+            bstr = atob(arr[1]), n = bstr.length, u8arr = new Uint8Array(n);
+            while(n--){
+                u8arr[n] = bstr.charCodeAt(n);
+            }
+            return new File([u8arr], filename, {type:mime});
+        }
+
+        const CategoryBadge = ({ category, onClick, active }) => {
+            const getIcon = (cat) => {
+                const lower = cat.toLowerCase();
+                if (lower.includes('favorite')) return 'fa-heart';
+                if (lower.includes('doc')) return 'fa-briefcase';
+                if (lower.includes('electronic') || lower.includes('phone')) return 'fa-mobile-screen';
+                if (lower.includes('cloth')) return 'fa-shirt';
+                if (lower.includes('key')) return 'fa-key';
+                if (lower.includes('tool')) return 'fa-wrench';
+                if (lower.includes('text') || lower.includes('note')) return 'fa-align-left';
+                return 'fa-tag';
+            };
+
+            const iconClass = getIcon(category);
+            const isFav = category === 'Favorites';
+
+            return (
+                <button
+                    onClick={() => onClick && onClick(category)}
+                    className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap border snap-start
+                    ${active 
+                        ? (isFav ? 'bg-red-500 text-white border-red-500 shadow-md' : 'bg-blue-600 text-white border-blue-600 shadow-md') 
+                        : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 border-gray-200 dark:border-gray-800'}`} 
+                >
+                    <i className={`fa-solid ${iconClass} ${isFav && !active ? 'text-red-500' : ''}`}></i>
+                    <span>{category}</span>
+                </button>
+            );
+        };
+
+        function App() {
+            // --- State ---
+            const [items, setItems] = useState([]);
+            const [isLoaded, setIsLoaded] = useState(false); // Restored isLoaded for better UI feedback
+
+            const [categories, setCategories] = useState(() => {
+                const saved = localStorage.getItem('finder_categories');
+                if (saved) return JSON.parse(saved);
+                
+                const oldCustom = localStorage.getItem('finder_custom_categories');
+                const defaults = ['Documents', 'Electronics', 'Clothes', 'Keys', 'Tools', 'Texts', 'Others'];
+                if (oldCustom) {
+                    const customList = JSON.parse(oldCustom);
+                    return [...defaults, ...customList];
+                }
+                return defaults;
+            });
+
+            const [darkMode, setDarkMode] = useState(() => {
+                const saved = localStorage.getItem('finder_dark_mode');
+                return saved ? JSON.parse(saved) : false;
+            });
+            
+            const [view, setView] = useState('home'); 
+            const [searchQuery, setSearchQuery] = useState('');
+            const [activeCategory, setActiveCategory] = useState('All');
+            const [selectedItem, setSelectedItem] = useState(null);
+            const [notification, setNotification] = useState(null);
+            const fileInputRef = useRef(null);
+            const [pendingFiles, setPendingFiles] = useState([]);
+
+            const [sortOrder, setSortOrder] = useState('newest'); 
+            const [isGridView, setIsGridView] = useState(false);
+
+            const [formData, setFormData] = useState({
+                name: '', location: '', note: '', category: 'Others'
+            });
+
+            // Storage Info State
+            const [storageInfo, setStorageInfo] = useState({ usedVal: '0', usedUnit: 'KB', totalStr: '0 GB', percent: 0 });
+
+            // UI State
+            const [showManageCategories, setShowManageCategories] = useState(false);
+
+            // Swipe State
+            const [touchStart, setTouchStart] = useState(null);
+            const [touchEnd, setTouchEnd] = useState(null);
+
+            // --- Effects ---
+            
+            // 1. Initial Load from IndexedDB
+            useEffect(() => {
+                const loadData = async () => {
+                    try {
+                        const loadedItems = await dbHelper.getAll();
+                        setItems(loadedItems);
+                        setIsLoaded(true);
+                    } catch (e) {
+                        console.error("Failed to load DB", e);
+                        setIsLoaded(true);
+                    }
+                };
+                loadData();
+            }, []);
+
+            // 2. Save Data & Calc Storage
+            useEffect(() => {
+                if (!isLoaded) return; 
+
+                const saveDataAndCalc = async () => {
+                    try { await dbHelper.saveAll(items); } catch(e) { showNotification("Error saving to Database"); }
+
+                    let usedBytes = 0;
+                    let totalBytes = 0;
+                    try {
+                        if (navigator.storage && navigator.storage.estimate) {
+                            const estimate = await navigator.storage.estimate();
+                            if (estimate.usage) usedBytes = estimate.usage;
+                            if (estimate.quota) totalBytes = estimate.quota;
+                        }
+                    } catch (e) { console.error(e); }
+
+                    // Fallback
+                    if (!totalBytes) {
+                         const json = JSON.stringify(items);
+                         usedBytes = new Blob([json]).size;
+                         totalBytes = 1024 * 1024 * 1024 * 2; 
+                    }
+
+                    // Dynamic Usage Unit Logic
+                    let usedFormatted = '';
+                    let usedUnit = '';
+                    
+                    if (usedBytes < 1024 * 1024) {
+                        usedFormatted = (usedBytes / 1024).toFixed(1);
+                        usedUnit = 'KB';
+                    } else if (usedBytes < 1024 * 1024 * 1024) {
+                        usedFormatted = (usedBytes / (1024 * 1024)).toFixed(1);
+                        usedUnit = 'MB';
+                    } else {
+                        usedFormatted = (usedBytes / (1024 * 1024 * 1024)).toFixed(2);
+                        usedUnit = 'GB';
+                    }
+
+                    let totalFormatted = (totalBytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+                    const percent = Math.min((usedBytes / totalBytes) * 100, 100);
+                    
+                    setStorageInfo({ 
+                        usedVal: usedFormatted, 
+                        usedUnit: usedUnit, 
+                        totalStr: totalFormatted, 
+                        percent: percent 
+                    });
+                };
+                saveDataAndCalc();
+            }, [items, isLoaded]);
+
+            useEffect(() => {
+                localStorage.setItem('finder_categories', JSON.stringify(categories));
+            }, [categories]);
+
+            useEffect(() => {
+                localStorage.setItem('finder_dark_mode', JSON.stringify(darkMode));
+                if (darkMode) {
+                    document.documentElement.classList.add('dark');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                }
+                const cleanUpTrash = () => {
+                    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+                    const now = Date.now();
+                    const cleanedItems = items.filter(item => {
+                        if (!item.deletedAt) return true;
+                        if (now - new Date(item.deletedAt).getTime() > THIRTY_DAYS_MS) return false; 
+                        return true; 
+                    });
+                    if (cleanedItems.length !== items.length) setItems(cleanedItems);
+                };
+                if(isLoaded) cleanUpTrash();
+            }, [darkMode, isLoaded]); 
+
+            const showNotification = (msg) => {
+                setNotification(msg);
+                setTimeout(() => setNotification(null), 3000);
+            };
+
+            // --- Handlers ---
+            
+            // Swipe Logic
+            const minSwipeDistance = 50;
+            const onTouchStart = (e) => {
+                setTouchEnd(null);
+                setTouchStart(e.targetTouches[0].clientX);
+            }
+            const onTouchMove = (e) => setTouchEnd(e.targetTouches[0].clientX);
+            const onTouchEnd = () => {
+                if (!touchStart || !touchEnd) return;
+                const distance = touchStart - touchEnd;
+                const isLeftSwipe = distance > minSwipeDistance;
+                const isRightSwipe = distance < -minSwipeDistance;
+                
+                if (isLeftSwipe || isRightSwipe) {
+                    const filterCategories = ['All', 'Favorites', ...categories];
+                    const currentIndex = filterCategories.indexOf(activeCategory);
+                    
+                    if (isLeftSwipe) { // Swipe Left -> Next Category
+                        const nextIndex = (currentIndex + 1) % filterCategories.length;
+                        setActiveCategory(filterCategories[nextIndex]);
+                    } else { // Swipe Right -> Prev Category
+                        const prevIndex = (currentIndex - 1 + filterCategories.length) % filterCategories.length;
+                        setActiveCategory(filterCategories[prevIndex]);
+                    }
+                }
+            }
+
+            const handleFileUpload = async (e) => {
+                const files = Array.from(e.target.files);
+                if (files.length === 0) return;
+                showNotification(`Processing ${files.length} file(s)...`);
+                try {
+                    const newUploads = await Promise.all(files.map(async (file) => {
+                        if (file.type.startsWith('image/')) {
+                            const content = await compressImage(file);
+                            return { type: 'image', content };
+                        } else if (file.type.startsWith('video/')) {
+                            const content = await readFileAsBase64(file);
+                            return { type: 'video', content };
+                        }
+                        return null;
+                    }));
+                    setPendingFiles(prev => [...prev, ...newUploads.filter(Boolean)]);
+                } catch (err) { showNotification("Error processing files"); }
+            };
+
+            const removePendingFile = (index) => setPendingFiles(prev => prev.filter((_, i) => i !== index));
+
+            const handleAddCategory = () => {
+                const newCat = prompt("Enter new category name:");
+                if (newCat && newCat.trim() !== "") {
+                    const formatted = newCat.trim();
+                    if (categories.includes(formatted)) {
+                        showNotification("Category already exists!");
+                        setFormData({ ...formData, category: formatted });
+                        return;
+                    }
+                    setCategories([...categories, formatted]);
+                    setFormData({ ...formData, category: formatted }); 
+                    showNotification("Category added!");
+                }
+            };
+
+            const handleRenameCategory = (oldName) => {
+                if (oldName === 'Others') return; // Protect Others
+                const newName = prompt(`Rename '${oldName}' to:`, oldName);
+                if (newName && newName.trim() !== "" && newName !== oldName) {
+                    const formatted = newName.trim();
+                    if (categories.includes(formatted)) {
+                        showNotification("Category name already exists!");
+                        return;
+                    }
+                    // Update category list
+                    const updatedCategories = categories.map(c => c === oldName ? formatted : c);
+                    setCategories(updatedCategories);
+                    // Update items
+                    const updatedItems = items.map(item => item.category === oldName ? { ...item, category: formatted } : item);
+                    setItems(updatedItems);
+                    showNotification(`Renamed to ${formatted}`);
+                }
+            };
+
+            const handleDeleteCategory = (catName) => {
+                if (catName === 'Others') return;
+                if (confirm(`Delete '${catName}'? All items in this category will be moved to 'Others'.`)) {
+                    // Update category list
+                    const updatedCategories = categories.filter(c => c !== catName);
+                    setCategories(updatedCategories);
+                    // Update items
+                    const updatedItems = items.map(item => item.category === catName ? { ...item, category: 'Others' } : item);
+                    setItems(updatedItems);
+                    showNotification(`Category deleted`);
+                }
+            };
+
+            const handleSave = () => {
+                if ((!formData.location && !formData.name) || (pendingFiles.length === 0 && !formData.name)) {
+                    showNotification("Name, Location or File required!");
+                    return;
+                }
+                const baseName = formData.name || 'Untitled';
+                let newItems = [];
+                
+                if (pendingFiles.length === 0) {
+                     newItems.push({
+                        id: Date.now().toString(),
+                        ...formData,
+                        createdAt: new Date().toISOString(),
+                        name: baseName,
+                        isFavorite: false,
+                        isPinned: false,
+                        mediaType: null,
+                        image: null
+                     });
+                } else {
+                    newItems = pendingFiles.map((file, index) => ({
+                        id: Date.now().toString() + Math.random().toString().slice(2,6),
+                        ...formData,
+                        createdAt: new Date().toISOString(),
+                        name: pendingFiles.length > 1 ? `${baseName} (${index + 1})` : baseName,
+                        isFavorite: false,
+                        isPinned: false,
+                        mediaType: file.type, 
+                        image: file.content
+                    }));
+                }
+                setItems([...newItems, ...items]);
+                setFormData({ name: '', location: '', note: '', category: 'Others' });
+                setPendingFiles([]);
+                setView('home');
+                showNotification(newItems.length > 1 ? "Batch saved successfully!" : "Saved successfully!");
+            };
+
+            const handleUpdate = () => {
+                let updatedImage = selectedItem.image;
+                let updatedMediaType = selectedItem.mediaType || 'image';
+                if (pendingFiles.length > 0) {
+                    updatedImage = pendingFiles[0].content;
+                    updatedMediaType = pendingFiles[0].type;
+                }
+                const updatedItem = { 
+                    ...selectedItem, 
+                    ...formData,
+                    image: updatedImage,
+                    mediaType: updatedMediaType
+                };
+                const newItems = items.map(item => item.id === updatedItem.id ? updatedItem : item);
+                setItems(newItems);
+                setSelectedItem(updatedItem);
+                setFormData({ name: '', location: '', note: '', category: 'Others' });
+                setPendingFiles([]);
+                setView('detail');
+                showNotification("Item updated!");
+            };
+
+            const handleEditClick = () => {
+                setFormData({
+                    name: selectedItem.name,
+                    location: selectedItem.location,
+                    note: selectedItem.note || '',
+                    category: selectedItem.category
+                });
+                setPendingFiles([]); 
+                setView('edit');
+            };
+
+            const handleDownload = () => {
+                if (!selectedItem.image) return;
+                const link = document.createElement('a');
+                link.href = selectedItem.image;
+                let ext = (selectedItem.mediaType === 'video' || selectedItem.image.startsWith('data:video')) ? 'mp4' : 'jpg';
+                link.download = `${selectedItem.name.replace(/\s+/g, '_')}.${ext}`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                showNotification("Saved to Device!");
+            };
+
+            const handleShare = async () => {
+                const shareData = {
+                    title: selectedItem.name,
+                    text: `${selectedItem.name} - ${selectedItem.note || selectedItem.location}`,
+                };
+                try {
+                    if (selectedItem.image && navigator.canShare) {
+                        let ext = (selectedItem.mediaType === 'video' || selectedItem.image.startsWith('data:video')) ? 'mp4' : 'jpg';
+                        const file = dataURLtoFile(selectedItem.image, `${selectedItem.name}.${ext}`);
+                        if (navigator.canShare({ files: [file] })) {
+                            await navigator.share({ ...shareData, files: [file] });
+                            showNotification("Shared successfully!");
+                            return;
+                        }
+                    }
+                    if (navigator.share) {
+                        await navigator.share(shareData);
+                        showNotification("Text shared!");
+                    } else { handleCopyText(); }
+                } catch (err) { if (err.name !== 'AbortError') handleCopyText(); }
+            };
+
+            const handleCopyText = () => {
+                const textToCopy = selectedItem.note || selectedItem.name;
+                if (textToCopy) {
+                    navigator.clipboard.writeText(textToCopy).then(() => showNotification("Copied to clipboard!"));
+                }
+            };
+
+            const handlePasteClipboard = async () => {
+                let text = "";
+                try {
+                    if (navigator.clipboard && navigator.clipboard.readText) {
+                        text = await navigator.clipboard.readText();
+                    } else { throw new Error("Clipboard API unavailable"); }
+                } catch (err) { text = prompt("Please paste your text here:"); }
+
+                if (!text || text.trim() === "") { showNotification("No text pasted."); return; }
+
+                const smartName = text.length > 25 ? text.substring(0, 25) + "..." : text;
+                const newItem = {
+                    id: Date.now().toString(),
+                    name: smartName,
+                    location: "From Clipboard",
+                    note: text,
+                    category: "Texts",
+                    image: null,
+                    createdAt: new Date().toISOString(),
+                    isFavorite: false,
+                    isPinned: false,
+                    mediaType: null
+                };
+                setItems([newItem, ...items]);
+                showNotification("Text saved to 'Texts'!");
+            };
+
+            const toggleFavorite = (e, id) => {
+                if(e) e.stopPropagation(); 
+                const updatedItems = items.map(item => item.id === id ? { ...item, isFavorite: !item.isFavorite } : item);
+                setItems(updatedItems);
+                if (selectedItem && selectedItem.id === id) setSelectedItem({ ...selectedItem, isFavorite: !selectedItem.isFavorite });
+            };
+
+            const togglePin = (e, id) => {
+                if(e) e.stopPropagation();
+                const updatedItems = items.map(item => item.id === id ? { ...item, isPinned: !item.isPinned } : item);
+                setItems(updatedItems);
+                if (selectedItem && selectedItem.id === id) setSelectedItem({ ...selectedItem, isPinned: !selectedItem.isPinned });
+                showNotification(items.find(i=>i.id===id).isPinned ? "Unpinned" : "Pinned to Top");
+            };
+
+            const handleDelete = (id) => {
+                if (confirm("Move this item to Recycle Bin?")) {
+                    const updatedItems = items.map(item => item.id === id ? { ...item, deletedAt: new Date().toISOString() } : item);
+                    setItems(updatedItems);
+                    setSelectedItem(null);
+                    setView('home');
+                    showNotification("Moved to Recycle Bin");
+                }
+            };
+
+            const handleRestoreItem = (id) => {
+                const updatedItems = items.map(item => {
+                    if (item.id === id) { const { deletedAt, ...rest } = item; return rest; }
+                    return item;
+                });
+                setItems(updatedItems);
+                showNotification("Item Restored!");
+            };
+
+            const handlePermanentDelete = (id) => {
+                if(confirm("Delete this item permanently?")) {
+                    setItems(items.filter(item => item.id !== id));
+                    showNotification("Deleted Permanently");
+                }
+            };
+
+            const handleEmptyBin = () => {
+                if (trashItems.length === 0) return;
+                if (confirm("Are you sure you want to permanently delete all items in the Recycle Bin?")) {
+                    setItems(items.filter(item => !item.deletedAt));
+                    showNotification("Recycle Bin Emptied");
+                }
+            };
+
+            const handleBackup = async () => {
+                try {
+                    // Get all data from IndexedDB
+                    const allItems = await dbHelper.getAll();
+                    
+                    // Create a Blob instead of a string (Fixes the crash)
+                    const blob = new Blob([JSON.stringify(allItems)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = "finder_backup_" + new Date().toISOString().slice(0,10) + ".json";
+                    document.body.appendChild(link);
+                    link.click();
+                    
+                    // Cleanup
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(url);
+                    
+                    showNotification("Backup downloaded!");
+                } catch (e) {
+                    console.error(e);
+                    showNotification("Backup failed: " + e.message);
+                }
+            };
+
+            const handleRestore = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const importedItems = JSON.parse(event.target.result);
+                        if (Array.isArray(importedItems)) {
+                            if(confirm(`Found ${importedItems.length} items. Add them to your current list?`)) {
+                                const existingIds = new Set(items.map(i => i.id));
+                                const newCategoriesFound = new Set();
+                                const processedItems = importedItems.map(item => {
+                                    if (!categories.includes(item.category) && item.category !== 'Others') {
+                                        newCategoriesFound.add(item.category);
+                                    }
+                                    const sanitized = {
+                                        ...item,
+                                        isFavorite: item.isFavorite || false,
+                                        isPinned: item.isPinned || false,
+                                        deletedAt: item.deletedAt || undefined,
+                                        mediaType: item.mediaType || (item.image ? 'image' : null)
+                                    };
+                                    if (existingIds.has(item.id)) return { ...sanitized, id: Date.now().toString() + Math.random().toString().slice(2, 6) };
+                                    return sanitized;
+                                });
+                                if (newCategoriesFound.size > 0) setCategories(prev => [...prev, ...Array.from(newCategoriesFound)]);
+                                setItems(prevItems => [...prevItems, ...processedItems]);
+                                showNotification(`Added ${processedItems.length} items!`);
+                                setView('home');
+                            }
+                        } else { showNotification("Invalid backup file."); }
+                    } catch (error) { showNotification("Error parsing file."); }
+                    if(fileInputRef.current) fileInputRef.current.value = "";
+                };
+                reader.readAsText(file);
+            };
+
+            const handleResetApp = async () => {
+                if (confirm("WARNING: This will delete ALL data (photos, videos, notes) permanently and reset the app. Are you sure?")) {
+                    try {
+                        await dbHelper.clear();
+                        localStorage.clear();
+                        window.location.reload();
+                    } catch (e) {
+                        showNotification("Error resetting app");
+                    }
+                }
+            };
+
+            const filterCategories = ['All', 'Favorites', ...categories];
+
+            const filteredAndSortedItems = items
+                .filter(item => {
+                    if (item.deletedAt) return false;
+                    const query = searchQuery.toLowerCase();
+                    const dateStr = new Date(item.createdAt).toLocaleDateString().toLowerCase();
+                    const matchesSearch = item.name.toLowerCase().includes(query) ||
+                                        item.location.toLowerCase().includes(query) ||
+                                        dateStr.includes(query);
+                    if (activeCategory === 'Favorites') return matchesSearch && item.isFavorite;
+                    const matchesCategory = activeCategory === 'All' || item.category === activeCategory;
+                    return matchesSearch && matchesCategory;
+                })
+                .sort((a, b) => {
+                    if (a.isPinned && !b.isPinned) return -1;
+                    if (!a.isPinned && b.isPinned) return 1;
+                    const dateA = new Date(a.createdAt).getTime();
+                    const dateB = new Date(b.createdAt).getTime();
+                    return sortOrder === 'newest' ? dateB - dateA : dateA - dateB;
+                });
+            
+            const trashItems = items.filter(item => item.deletedAt).sort((a,b) => new Date(b.deletedAt) - new Date(a.deletedAt));
+
+            const renderMediaThumbnail = (item, opacity = false) => {
+                const opClass = opacity ? 'opacity-50' : '';
+                if (!item.image) {
+                     return (
+                        <div className="text-gray-300 dark:text-gray-500 w-full h-full flex items-center justify-center">
+                             <i className={`fa-solid ${item.category === 'Texts' ? 'fa-align-left text-xl' : 'fa-camera'}`}></i>
+                        </div>
+                    );
+                }
+                return (
+                    <div className="w-full h-full relative">
+                        {item.mediaType === 'video' ? (
+                            <div className="w-full h-full relative flex items-center justify-center bg-black">
+                                <video src={item.image} className={`w-full h-full object-cover ${opClass}`} />
+                                <div className="absolute inset-0 flex items-center justify-center bg-black/30"><i className="fa-solid fa-play text-white text-lg"></i></div>
+                            </div>
+                        ) : (
+                            <img src={item.image} alt={item.name} className={`w-full h-full object-cover ${opClass}`} />
+                        )}
+                    </div>
+                );
+            };
+
+            // --- RENDER HELP SECTION ---
+            const renderHelp = () => (
+                <div className="flex flex-col h-full bg-white dark:bg-gray-900 animate-fade transition-colors">
+                    <div className="p-4 border-b border-gray-100 dark:border-gray-800 flex items-center">
+                        <button onClick={() => setView('settings')} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full mr-2 transition-colors">
+                            <i className="fa-solid fa-arrow-left text-gray-600 dark:text-gray-300"></i>
+                        </button>
+                        <h2 className="text-lg font-semibold text-gray-800 dark:text-white">Help & Instructions</h2>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto p-6 space-y-8 text-gray-700 dark:text-gray-300 pb-20">
+                        <div className="bg-blue-50 dark:bg-blue-900/20 p-5 rounded-2xl border border-blue-100 dark:border-blue-800">
+                            <h3 className="text-xl font-bold text-blue-800 dark:text-blue-300 mb-2">Welcome to Finder!</h3>
+                            <p className="text-sm leading-relaxed">Finder is your personal offline organizer. Store photos, videos, and notes of where you put your things, all directly on your device.</p>
+                        </div>
+
+                        <section>
+                            <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center"><i className="fa-solid fa-plus-circle text-blue-500 mr-2"></i> Adding Items</h3>
+                            <ul className="list-disc ml-5 space-y-2 text-sm">
+                                <li>Tap the big <strong>+</strong> button on the home screen.</li>
+                                <li><strong>Photos & Videos:</strong> Tap the upload box to select items from your gallery or take a new photo.</li>
+                                <li><strong>Text Notes:</strong> You can paste text directly from your clipboard using the clipboard button on the home screen.</li>
+                                <li><strong>Batch Upload:</strong> You can select multiple photos/videos at once!</li>
+                            </ul>
+                        </section>
+
+                        <section>
+                            <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center"><i className="fa-solid fa-layer-group text-purple-500 mr-2"></i> Categories & Navigation</h3>
+                            <ul className="list-disc ml-5 space-y-2 text-sm">
+                                <li><strong>Swipe Navigation:</strong> Swipe Left or Right anywhere on the home screen to quickly switch between categories (e.g., from All to Favorites).</li>
+                                <li><strong>Manage Categories:</strong> Go to Settings > Manage Categories. Click the dropdown arrow to rename or delete custom categories.</li>
+                                <li><em>Note: Deleting a category moves its items to "Others".</em></li>
+                            </ul>
+                        </section>
+
+                        <section>
+                            <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center"><i className="fa-solid fa-database text-green-500 mr-2"></i> Storage & Backup</h3>
+                            <ul className="list-disc ml-5 space-y-2 text-sm">
+                                <li><strong>Unlimited Storage:</strong> Finder uses IndexedDB, so you can store as many GBs of videos/photos as your phone allows.</li>
+                                <li><strong>Backup:</strong> Go to Settings > Backup to download a single file containing all your data.</li>
+                                <li><strong>Restore:</strong> Use the "Restore" button to merge a backup file into your current app. Ideal for moving data between phones.</li>
+                            </ul>
+                        </section>
+                        
+                         <section>
+                            <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center"><i className="fa-solid fa-mobile-screen text-orange-500 mr-2"></i> Installing as App (PWA)</h3>
+                            <div className="text-sm space-y-2">
+                                <p>To use full-screen without the browser bar:</p>
+                                <p><strong>iOS (Safari):</strong> Tap "Share" icon <i className="fa-solid fa-arrow-up-from-bracket"></i> -> "Add to Home Screen".</p>
+                                <p><strong>Android (Chrome):</strong> Tap "Three dots" menu -> "Add to Home screen" or "Install App".</p>
+                            </div>
+                        </section>
+
+                        <section>
+                             <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center"><i className="fa-solid fa-trash-can text-red-500 mr-2"></i> Recycle Bin</h3>
+                            <p className="text-sm">Deleted items go to the Recycle Bin. They stay there for <strong>30 days</strong> before being permanently removed. You can restore them anytime before that.</p>
+                        </section>
+
+                        {/* SUPPORT SECTION */}
+                        <section className="pt-4 border-t border-gray-200 dark:border-gray-700">
+                            <h3 className="font-bold text-gray-900 dark:text-white mb-3 flex items-center"><i className="fa-solid fa-headset text-pink-500 mr-2"></i> Support</h3>
+                            <p className="text-sm">Need help or have suggestions? Contact us at: <br/> <a href="mailto:voiceofrupam@aol.com" className="text-blue-600 dark:text-blue-400 font-medium mt-1 inline-block">voiceofrupam@aol.com</a></p>
+                        </section>
+                    </div>
+                </div>
+            );
+
+            const renderHome = () => (
+                <div 
+                    className="flex flex-col h-full relative animate-fade bg-gray-50 dark:bg-gray-900 transition-colors"
+                    onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+                >
+                    <div className="sticky top-0 bg-white dark:bg-gray-900 z-10 pt-4 pb-2 px-4 shadow-sm border-b dark:border-gray-800">
+                        <div className="flex justify-between items-center mb-4">
+                            <h1 className="text-2xl font-bold text-gray-800 dark:text-white">Finder.</h1>
+                            <button onClick={() => setView('settings')} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-2 transition-colors">
+                                <i className="fa-solid fa-gear text-xl"></i>
+                            </button>
+                        </div>
+                        <div className="relative mb-3">
+                            <i className="fa-solid fa-magnifying-glass absolute left-4 top-3.5 text-gray-400"></i>
+                            <input type="text" placeholder="Search name, location, date..." 
+                                className="w-full pl-10 pr-4 py-3 bg-gray-100 dark:bg-gray-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800 dark:text-gray-200 dark:placeholder-gray-500 transition-colors border border-transparent dark:border-gray-800"
+                                value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+                            {searchQuery && (
+                                <button onClick={() => setSearchQuery('')} className="absolute right-3 top-3.5 text-gray-400 p-1 hover:text-gray-600">
+                                    <i className="fa-solid fa-xmark"></i>
+                                </button>
+                            )}
+                        </div>
+
+                        <div className="flex justify-between items-center mb-2 px-1">
+                            <button onClick={() => setSortOrder(prev => prev === 'newest' ? 'oldest' : 'newest')}
+                                className="text-xs font-semibold text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 flex items-center gap-1 transition-colors">
+                                <i className={`fa-solid ${sortOrder === 'newest' ? 'fa-arrow-down-wide-short' : 'fa-arrow-up-wide-short'}`}></i>
+                                {sortOrder === 'newest' ? 'Newest' : 'Oldest'}
+                            </button>
+                            <button onClick={() => setIsGridView(!isGridView)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors p-1">
+                                <i className={`fa-solid ${isGridView ? 'fa-list' : 'fa-grip'} text-lg`}></i>
+                            </button>
+                        </div>
+
+                        <div className="flex overflow-x-auto space-x-2 pb-2 no-scrollbar snap-x">
+                            {filterCategories.map(cat => (
+                                <CategoryBadge key={cat} category={cat} active={activeCategory === cat} onClick={setActiveCategory} />
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="px-4 space-y-3 pb-24 overflow-y-auto pt-4 flex-1">
+                        {!isLoaded ? (
+                            <div className="flex items-center justify-center h-40">
+                                <p className="text-gray-400 text-sm">Loading...</p>
+                            </div>
+                        ) : filteredAndSortedItems.length === 0 ? (
+                            <div className="text-center py-20 text-gray-400 dark:text-gray-600">
+                                <div className="mb-4 bg-gray-200 dark:bg-gray-800 inline-block p-6 rounded-full"><i className={`fa-solid ${activeCategory === 'Favorites' ? 'fa-heart-crack' : 'fa-magnifying-glass'} text-3xl opacity-30`}></i></div>
+                                <p>{activeCategory === 'Favorites' ? 'No favorites yet.' : 'No items found.'}</p>
+                            </div>
+                        ) : (
+                            <div className={isGridView ? "grid grid-cols-2 gap-3" : "space-y-3"}>
+                                {filteredAndSortedItems.map(item => (
+                                    <div key={item.id} onClick={() => { setSelectedItem(item); setView('detail'); }}
+                                        className={`bg-white dark:bg-gray-800 rounded-xl shadow-sm border transition-colors cursor-pointer relative group overflow-hidden
+                                        ${isGridView 
+                                            ? 'p-0 aspect-square flex flex-col border-gray-100 dark:border-gray-800' 
+                                            : 'p-3 flex items-start space-x-3 border-gray-100 dark:border-gray-800 active:bg-gray-50 dark:active:bg-gray-700'}
+                                        ${item.isPinned ? 'ring-2 ring-blue-500/20 border-blue-500/50' : ''}`}
+                                    >
+                                        {item.isPinned && (
+                                            <div className="absolute top-2 left-2 z-10 bg-blue-500 text-white w-5 h-5 rounded-full flex items-center justify-center shadow-sm text-[10px]">
+                                                <i className="fa-solid fa-thumbtack"></i>
+                                            </div>
+                                        )}
+
+                                        <div className={`
+                                            bg-gray-100 dark:bg-gray-700 overflow-hidden relative flex items-center justify-center
+                                            ${isGridView ? 'w-full h-3/4 rounded-t-xl rounded-b-none' : 'w-16 h-16 rounded-lg flex-shrink-0 border border-gray-200 dark:border-gray-600'}
+                                        `}>
+                                            {renderMediaThumbnail(item)}
+                                        </div>
+                                        
+                                        <div className={`flex-1 min-w-0 ${isGridView ? 'p-2' : 'pr-8'}`}>
+                                            <div className="flex justify-between items-start">
+                                                <h3 className={`font-semibold text-gray-800 dark:text-white truncate ${isGridView ? 'text-sm' : 'text-base'}`}>{item.name}</h3>
+                                            </div>
+                                            {!isGridView && (
+                                                <>
+                                                    <div className="flex items-center text-gray-500 dark:text-gray-400 text-sm mt-1">
+                                                        <i className="fa-solid fa-location-dot mr-1.5 text-xs"></i>
+                                                        <span className="truncate">{item.location}</span>
+                                                    </div>
+                                                    <span className="text-[10px] text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-700 px-1.5 py-0.5 rounded mt-1 inline-block">
+                                                        {new Date(item.createdAt).toLocaleDateString()}
+                                                    </span>
+                                                </>
+                                            )}
+                                        </div>
+                                        
+                                        {item.isFavorite && (
+                                            <div className="absolute top-3 right-3 text-red-500 drop-shadow-sm"><i className="fa-solid fa-heart"></i></div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="fixed bottom-6 right-6 flex flex-col items-center space-y-4 z-50">
+                        <div className="relative group flex items-center">
+                            <span className="absolute right-12 bg-gray-800 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">Paste from Clipboard</span>
+                            <button onClick={handlePasteClipboard} className="w-12 h-12 bg-white text-gray-800 rounded-full shadow-lg hover:scale-105 active:scale-95 transition-all flex items-center justify-center border border-gray-200"><i className="fa-solid fa-clipboard text-lg"></i></button>
+                        </div>
+                        <button onClick={() => setView('add')} className="bg-blue-600 text-white w-14 h-14 rounded-full shadow-lg hover:bg-blue-700 active:scale-90 transition-transform flex items-center justify-center text-xl border-2 border-white dark:border-gray-900"><i className="fa-solid fa-plus"></i></button>
+                    </div>
+                </div>
+            );
+
+            const renderForm = (mode) => (
+                <div className="flex flex-col h-full bg-white dark:bg-gray-900 animate-fade transition-colors">
+                    <div className="p-4 border-b border-gray-100 dark:border-gray-800 flex items-center">
+                        <button onClick={() => setView(mode === 'edit' ? 'detail' : 'home')} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full mr-2 transition-colors">
+                            <i className="fa-solid fa-arrow-left text-gray-600 dark:text-gray-300"></i>
+                        </button>
+                        <h2 className="text-lg font-semibold text-gray-800 dark:text-white">{mode === 'edit' ? 'Edit Item' : 'Add New Item'}</h2>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-6">
+                        <div className="space-y-3">
+                            <label className="relative w-full h-32 bg-gray-50 dark:bg-gray-800 rounded-2xl border-2 border-dashed border-gray-300 dark:border-gray-700 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-750 transition-colors overflow-hidden">
+                                {mode === 'edit' && selectedItem.image && pendingFiles.length === 0 ? (
+                                    <div className="w-full h-full relative">
+                                        {selectedItem.mediaType === 'video' ? (
+                                             <video src={selectedItem.image} className="w-full h-full object-cover" />
+                                        ) : (
+                                            <img src={selectedItem.image} alt="Current" className="w-full h-full object-cover" />
+                                        )}
+                                        <div className="absolute inset-0 bg-black/40 flex items-center justify-center text-white font-bold">Tap to Replace</div>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <i className="fa-solid fa-cloud-arrow-up text-2xl text-gray-400 dark:text-gray-600 mb-2"></i>
+                                        <span className="text-sm text-gray-500 dark:text-gray-400">
+                                            {mode === 'edit' ? 'Change Media' : 'Select Photos or Videos'}
+                                        </span>
+                                    </>
+                                )}
+                                <input type="file" multiple accept="image/*,video/*" onChange={handleFileUpload} className="hidden" />
+                            </label>
+
+                            {pendingFiles.length > 0 && (
+                                <div>
+                                    <p className="text-xs text-gray-500 mb-2">{pendingFiles.length} file(s) ready</p>
+                                    <div className="flex space-x-3 overflow-x-auto pb-2 no-scrollbar">
+                                        {pendingFiles.map((file, idx) => (
+                                            <div key={idx} className="w-20 h-20 flex-shrink-0 relative rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800 border dark:border-gray-700">
+                                                {file.type === 'video' ? (
+                                                    <video src={file.content} className="w-full h-full object-cover" />
+                                                ) : (
+                                                    <img src={file.content} className="w-full h-full object-cover" />
+                                                )}
+                                                <button onClick={() => removePendingFile(idx)} className="absolute top-0 right-0 bg-red-500 text-white w-5 h-5 flex items-center justify-center rounded-bl-lg">
+                                                    <i className="fa-solid fa-xmark text-xs"></i>
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
+                                <input type="text" placeholder="e.g. Passport" className="w-full p-3 bg-gray-50 dark:bg-gray-800 text-gray-800 dark:text-white rounded-lg border border-transparent dark:border-gray-800 focus:border-blue-500 dark:focus:border-blue-500 transition-colors outline-none"
+                                    value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Location</label>
+                                <input type="text" placeholder="e.g. Top drawer" className="w-full p-3 bg-gray-50 dark:bg-gray-800 text-gray-800 dark:text-white rounded-lg border border-transparent dark:border-gray-800 focus:border-blue-500 dark:focus:border-blue-500 transition-colors outline-none"
+                                    value={formData.location} onChange={(e) => setFormData({...formData, location: e.target.value})} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Note (Optional)</label>
+                                <textarea placeholder="Additional details..." className="w-full p-3 bg-gray-50 dark:bg-gray-800 text-gray-800 dark:text-white rounded-lg border border-transparent dark:border-gray-800 focus:border-blue-500 dark:focus:border-blue-500 transition-colors outline-none h-24 resize-none"
+                                    value={formData.note} onChange={(e) => setFormData({...formData, note: e.target.value})}></textarea>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Category</label>
+                                <div className="flex flex-wrap gap-2">
+                                    {categories.map(cat => (
+                                        <button key={cat} onClick={() => setFormData({...formData, category: cat})}
+                                            className={`px-3 py-2 rounded-lg text-sm border transition-colors ${
+                                                formData.category === cat 
+                                                ? 'bg-blue-600 text-white border-blue-600' 
+                                                : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700'
+                                            }`}>
+                                            {cat}
+                                        </button>
+                                    ))}
+                                    <button onClick={handleAddCategory} className="px-3 py-2 rounded-lg text-sm border bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700">
+                                        <i className="fa-solid fa-plus mr-1"></i>New
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="p-4 border-t dark:border-gray-800">
+                        <button onClick={mode === 'edit' ? handleUpdate : handleSave} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3.5 rounded-xl shadow-lg flex justify-center items-center space-x-2 transition-colors">
+                            <i className={`fa-solid ${mode === 'edit' ? 'fa-check' : 'fa-floppy-disk'}`}></i>
+                            <span>{mode === 'edit' ? 'Update Item' : 'Save Batch'}</span>
+                        </button>
+                    </div>
+                </div>
+            );
+
+            const renderDetail = () => {
+                if (!selectedItem) return null;
+                return (
+                    <div className="flex flex-col h-full bg-white dark:bg-gray-900 animate-fade transition-colors">
+                        <div className="relative h-72 bg-gray-900 flex items-center justify-center shrink-0">
+                            {selectedItem.image ? (
+                                selectedItem.mediaType === 'video' ? (
+                                    <video controls src={selectedItem.image} className="w-full h-full object-contain" />
+                                ) : (
+                                    <img src={selectedItem.image} alt={selectedItem.name} className="w-full h-full object-contain" />
+                                )
+                            ) : (
+                                <div className="text-gray-600">
+                                    <i className={`fa-solid ${selectedItem.category === 'Texts' ? 'fa-align-left' : 'fa-camera'} text-5xl opacity-50`}></i>
+                                </div>
+                            )}
+                            
+                            <button onClick={() => setView('home')} className="absolute top-4 left-4 bg-black/40 hover:bg-black/60 text-white w-10 h-10 flex items-center justify-center rounded-full backdrop-blur-sm transition-colors">
+                                <i className="fa-solid fa-arrow-left"></i>
+                            </button>
+                            
+                            <div className="absolute top-4 right-4 flex space-x-2">
+                                <button onClick={handleShare} className="bg-black/40 hover:bg-black/60 text-white w-10 h-10 flex items-center justify-center rounded-full backdrop-blur-sm transition-colors" title="Share">
+                                    <i className="fa-solid fa-share-from-square"></i>
+                                </button>
+
+                                {selectedItem.image ? (
+                                    <button onClick={handleDownload} className="bg-black/40 hover:bg-black/60 text-white w-10 h-10 flex items-center justify-center rounded-full backdrop-blur-sm transition-colors" title="Save to Device">
+                                        <i className="fa-solid fa-download"></i>
+                                    </button>
+                                ) : (
+                                    <button onClick={handleCopyText} className="bg-black/40 hover:bg-black/60 text-white w-10 h-10 flex items-center justify-center rounded-full backdrop-blur-sm transition-colors" title="Copy Text">
+                                        <i className="fa-solid fa-copy"></i>
+                                    </button>
+                                )}
+
+                                <button onClick={handleEditClick} 
+                                    className="bg-black/40 hover:bg-black/60 text-white w-10 h-10 flex items-center justify-center rounded-full backdrop-blur-sm transition-colors">
+                                    <i className="fa-solid fa-pen"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div className="flex-1 p-6 space-y-6 overflow-y-auto">
+                            <div className="flex justify-between items-start">
+                                <div>
+                                    <CategoryBadge category={selectedItem.category} />
+                                    <h1 className="text-2xl font-bold text-gray-800 dark:text-white mt-2 break-words">{selectedItem.name}</h1>
+                                    <p className="text-xs text-gray-400 mt-1">Added on {new Date(selectedItem.createdAt).toLocaleDateString()}</p>
+                                </div>
+                            </div>
+                            
+                            <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-xl border border-blue-100 dark:border-blue-800/50">
+                                <h3 className="text-xs font-bold text-blue-800 dark:text-blue-300 uppercase mb-1">Location / Source</h3>
+                                <div className="flex items-center space-x-2 text-blue-900 dark:text-blue-200 font-medium text-lg">
+                                    <i className="fa-solid fa-location-dot"></i>
+                                    <span className="break-words">{selectedItem.location}</span>
+                                </div>
+                            </div>
+
+                            {selectedItem.note && (
+                                <div className="bg-gray-50 dark:bg-gray-800 p-4 rounded-xl border border-gray-100 dark:border-gray-700 relative group">
+                                    <div className="flex justify-between items-center mb-2">
+                                        <h3 className="text-xs font-bold text-gray-500 uppercase">Notes / Content</h3>
+                                        <button onClick={handleCopyText} className="text-gray-400 hover:text-blue-500 text-xs">
+                                            <i className="fa-solid fa-copy mr-1"></i>Copy
+                                        </button>
+                                    </div>
+                                    <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono text-sm leading-relaxed">
+                                        {selectedItem.note}
+                                    </p>
+                                </div>
+                            )}
+
+                            <div className="pt-4 space-y-3">
+                                <div className="flex space-x-2">
+                                    <button 
+                                        onClick={(e) => togglePin(e, selectedItem.id)}
+                                        className={`flex-1 border py-3 rounded-xl font-medium flex items-center justify-center space-x-2 transition-colors
+                                        ${selectedItem.isPinned
+                                            ? 'border-blue-200 bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:border-blue-900 dark:text-blue-400' 
+                                            : 'border-gray-300 text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800'}`}
+                                    >
+                                        <i className={`fa-solid fa-thumbtack ${selectedItem.isPinned ? 'text-blue-500' : 'text-gray-400'}`}></i>
+                                        <span>{selectedItem.isPinned ? 'Unpin' : 'Pin to Top'}</span>
+                                    </button>
+
+                                    <button 
+                                        onClick={(e) => toggleFavorite(e, selectedItem.id)}
+                                        className={`flex-1 border py-3 rounded-xl font-medium flex items-center justify-center space-x-2 transition-colors
+                                        ${selectedItem.isFavorite 
+                                            ? 'border-red-200 bg-red-50 text-red-600 dark:bg-red-900/20 dark:border-red-900 dark:text-red-400' 
+                                            : 'border-gray-300 text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800'}`}
+                                    >
+                                        <i className={`fa-solid fa-heart ${selectedItem.isFavorite ? 'text-red-500' : 'text-gray-400'}`}></i>
+                                        <span>{selectedItem.isFavorite ? 'Unfav' : 'Favorite'}</span>
+                                    </button>
+                                </div>
+
+                                <button onClick={() => handleDelete(selectedItem.id)} className="w-full border border-red-200 dark:border-red-900/50 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 py-3 rounded-xl font-medium flex items-center justify-center space-x-2 transition-colors">
+                                    <i className="fa-solid fa-trash"></i>
+                                    <span>Delete Item</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderRecycleBin = () => (
+                <div className="flex flex-col h-full bg-white dark:bg-gray-900 animate-fade transition-colors">
+                    <div className="p-4 border-b border-gray-100 dark:border-gray-800 flex items-center">
+                        <button onClick={() => setView('settings')} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full mr-2 transition-colors">
+                            <i className="fa-solid fa-arrow-left text-gray-600 dark:text-gray-300"></i>
+                        </button>
+                        <div className="flex-1 ml-2">
+                            <h2 className="text-lg font-semibold text-gray-800 dark:text-white">Recycle Bin</h2>
+                            <p className="text-xs text-gray-400">Items deleted > 30 days ago are removed</p>
+                        </div>
+                        {trashItems.length > 0 && (
+                            <button onClick={handleEmptyBin} className="text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 px-3 py-1.5 rounded-lg text-xs font-bold uppercase transition-colors">
+                                Empty Bin
+                            </button>
+                        )}
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                        {trashItems.length === 0 ? (
+                            <div className="text-center py-20 text-gray-400 dark:text-gray-600">
+                                <div className="mb-4 bg-gray-100 dark:bg-gray-800 inline-block p-6 rounded-full"><i className="fa-solid fa-trash-can text-3xl opacity-30"></i></div>
+                                <p>Recycle Bin is empty.</p>
+                            </div>
+                        ) : (
+                            trashItems.map(item => {
+                                const deletedDate = new Date(item.deletedAt);
+                                const expiryDate = new Date(deletedDate.getTime() + (30 * 24 * 60 * 60 * 1000));
+                                const daysLeft = Math.ceil((expiryDate - new Date()) / (1000 * 60 * 60 * 24));
+                                return (
+                                    <div key={item.id} className="bg-white dark:bg-gray-800 rounded-xl p-3 shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col space-y-3">
+                                        <div className="flex items-start space-x-3">
+                                            <div className="w-12 h-12 bg-gray-100 dark:bg-gray-700 rounded-lg flex-shrink-0 overflow-hidden relative flex items-center justify-center">
+                                                {renderMediaThumbnail(item, true)}
+                                            </div>
+                                            <div className="flex-1">
+                                                <h3 className="font-semibold text-gray-800 dark:text-white truncate">{item.name}</h3>
+                                                <p className="text-xs text-red-500 mt-1">Auto-delete in {daysLeft} days</p>
+                                            </div>
+                                        </div>
+                                        <div className="flex space-x-2 pt-1">
+                                            <button onClick={() => handleRestoreItem(item.id)} className="flex-1 py-2 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 text-xs font-bold rounded-lg uppercase tracking-wide">Restore</button>
+                                            <button onClick={() => handlePermanentDelete(item.id)} className="flex-1 py-2 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-xs font-bold rounded-lg uppercase tracking-wide">Delete Forever</button>
+                                        </div>
+                                    </div>
+                                );
+                            })
+                        )}
+                    </div>
+                </div>
+            );
+
+            const renderSettings = () => (
+                <div className="flex flex-col h-full bg-white dark:bg-gray-900 animate-fade transition-colors">
+                    <div className="p-4 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center">
+                        <div className="flex items-center">
+                            <button onClick={() => setView('home')} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full mr-2 transition-colors">
+                                <i className="fa-solid fa-arrow-left text-gray-600 dark:text-gray-300"></i>
+                            </button>
+                            <h2 className="text-lg font-semibold text-gray-800 dark:text-white">Settings</h2>
+                        </div>
+                         {/* HELP ICON BUTTON TOP RIGHT */}
+                        <button onClick={() => setView('help')} className="w-8 h-8 rounded-full bg-blue-50 dark:bg-gray-800 text-blue-600 dark:text-blue-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-gray-700 transition-colors">
+                             <i className="fa-solid fa-question text-sm"></i>
+                        </button>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                        {/* APPEARANCE SECTION */}
+                        <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-5 border border-gray-200 dark:border-gray-800">
+                            <h3 className="text-sm font-bold text-gray-400 uppercase mb-4 tracking-wider">Appearance</h3>
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center text-gray-800 dark:text-white font-medium">
+                                    <div className="w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-900/50 flex items-center justify-center text-indigo-600 dark:text-indigo-400 mr-3"><i className="fa-solid fa-moon"></i></div>
+                                    Dark Mode
+                                </div>
+                                <div className="relative inline-block w-12 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" name="toggle" id="toggle" checked={darkMode} onChange={() => setDarkMode(!darkMode)}
+                                        className="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 appearance-none cursor-pointer transition-all duration-300"
+                                        style={{ right: darkMode ? '0' : '50%', borderColor: darkMode ? '#3b82f6' : '#d1d5db' }}
+                                    />
+                                    <label htmlFor="toggle" className={`toggle-label block overflow-hidden h-6 rounded-full cursor-pointer transition-colors duration-300 ${darkMode ? 'bg-blue-600' : 'bg-gray-300'}`}></label>
+                                </div>
+                            </div>
+                        </div>
+
+                         {/* CATEGORY MANAGER (COLLAPSIBLE) */}
+                        <div className="bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+                             <button 
+                                onClick={() => setShowManageCategories(!showManageCategories)}
+                                className="w-full flex items-center justify-between p-5 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                             >
+                                <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Manage Categories</h3>
+                                <div className="flex items-center text-gray-400">
+                                    <span className="text-xs mr-2">{categories.length} items</span>
+                                    <i className={`fa-solid fa-chevron-down transition-transform duration-300 ${showManageCategories ? 'rotate-180' : ''}`}></i>
+                                </div>
+                             </button>
+                             
+                             {showManageCategories && (
+                                <div className="p-5 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/50 animate-fade">
+                                     <div className="space-y-2">
+                                        {categories.map(cat => (
+                                            <div key={cat} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-100 dark:border-gray-600">
+                                                <span className="text-gray-800 dark:text-gray-200 text-sm font-medium pl-2">{cat}</span>
+                                                <div className="flex space-x-1">
+                                                    {cat !== 'Others' && (
+                                                        <>
+                                                            <button onClick={() => handleRenameCategory(cat)} className="p-2 text-gray-400 hover:text-blue-500 transition-colors"><i className="fa-solid fa-pen"></i></button>
+                                                            <button onClick={() => handleDeleteCategory(cat)} className="p-2 text-gray-400 hover:text-red-500 transition-colors"><i className="fa-solid fa-trash"></i></button>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                        <button onClick={handleAddCategory} className="w-full mt-2 py-2 text-sm text-blue-600 dark:text-blue-400 font-medium border border-dashed border-blue-300 dark:border-blue-700 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20">
+                                            <i className="fa-solid fa-plus mr-1"></i> Add Category
+                                        </button>
+                                     </div>
+                                </div>
+                             )}
+                        </div>
+
+                        {/* STORAGE SECTION */}
+                        <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-5 border border-gray-200 dark:border-gray-800">
+                             <h3 className="text-sm font-bold text-gray-400 uppercase mb-4 tracking-wider">Storage</h3>
+                             
+                             {/* STORAGE VISUALIZER */}
+                             <div className="mb-5">
+                                 <div className="flex items-end justify-between mb-2">
+                                     <div className="flex items-baseline">
+                                        <span className="text-2xl font-bold text-gray-800 dark:text-white mr-2">{storageInfo.usedVal} {storageInfo.usedUnit}</span>
+                                        <span className="text-sm text-gray-500 dark:text-gray-400">used</span>
+                                     </div>
+                                     <span className="text-xs text-gray-400">{storageInfo.totalStr} total</span>
+                                 </div>
+                                 <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3 overflow-hidden">
+                                     <div className="h-full bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full transition-all duration-700 ease-out" style={{width: `${Math.max(storageInfo.percent, 2)}%`}}></div>
+                                 </div>
+                             </div>
+
+                             <button onClick={() => setView('recycle_bin')} className="w-full flex items-center justify-between p-3 bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors">
+                                <div className="flex items-center text-gray-800 dark:text-white font-medium"><i className="fa-solid fa-trash-can mr-3 text-red-500"></i>Recycle Bin</div>
+                                <div className="flex items-center"><span className="text-xs text-gray-400 mr-2">{trashItems.length} items</span><i className="fa-solid fa-chevron-right text-xs text-gray-400"></i></div>
+                            </button>
+                        </div>
+
+                        {/* DATA MANAGEMENT SECTION */}
+                        <div className="bg-gray-50 dark:bg-gray-800 rounded-xl p-5 border border-gray-200 dark:border-gray-800 space-y-4">
+                            <h3 className="text-sm font-bold text-gray-400 uppercase mb-2 tracking-wider">Data Management</h3>
+                            <div>
+                                <div className="flex items-center mb-2 text-gray-800 dark:text-white font-medium"><i className="fa-solid fa-cloud-arrow-down mr-2 text-blue-600"></i><h3>Backup</h3></div>
+                                <button onClick={handleBackup} className="w-full bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 py-3 rounded-xl font-medium shadow-sm hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors">Download Backup</button>
+                            </div>
+                            <hr className="border-gray-200 dark:border-gray-700" />
+                            <div>
+                                <div className="flex items-center mb-2 text-gray-800 dark:text-white font-medium"><i className="fa-solid fa-cloud-arrow-up mr-2 text-green-600"></i><h3>Restore (Add)</h3></div>
+                                <input type="file" accept=".json" ref={fileInputRef} onChange={handleRestore} className="hidden" />
+                                <button onClick={() => fileInputRef.current && fileInputRef.current.click()} className="w-full bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 py-3 rounded-xl font-medium shadow-sm hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors">Merge from File</button>
+                                <p className="text-xs text-gray-400 mt-2">Adds items from file to your current list.</p>
+                            </div>
+                            <hr className="border-gray-200 dark:border-gray-700" />
+                            {/* RESET BUTTON */}
+                            <div>
+                                <div className="flex items-center mb-2 text-red-600 dark:text-red-400 font-medium"><i className="fa-solid fa-triangle-exclamation mr-2"></i><h3>Reset App</h3></div>
+                                <button onClick={handleResetApp} className="w-full bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 py-3 rounded-xl font-medium shadow-sm hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors">Reset Everything</button>
+                            </div>
+                            <hr className="border-gray-200 dark:border-gray-700" />
+                            {/* READ ME BUTTON (NEW) */}
+                            <div>
+                               <div className="flex items-center mb-2 text-indigo-600 dark:text-indigo-400 font-medium"><i className="fa-solid fa-book-open mr-2"></i><h3>User Guide</h3></div>
+                               <button onClick={() => setView('help')} className="w-full bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-900 text-indigo-600 dark:text-indigo-400 py-3 rounded-xl font-medium shadow-sm hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors">Read Me & Help</button>
+                            </div>
+                        </div>
+                         
+                         {/* CREDITS FOOTER */}
+                         <div className="pt-6 text-center">
+                             <p className="text-xs text-gray-400 font-medium">Finder App v4.4</p>
+                             <p className="text-[10px] text-gray-500 mt-1 opacity-75">Created by Rupam & Pritam</p>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="max-w-md mx-auto h-[100dvh] bg-white dark:bg-gray-900 overflow-hidden relative shadow-2xl transition-colors duration-300 flex flex-col">
+                    {view === 'home' && renderHome()}
+                    {view === 'add' && renderForm('add')}
+                    {view === 'edit' && renderForm('edit')}
+                    {view === 'detail' && renderDetail()}
+                    {view === 'settings' && renderSettings()}
+                    {view === 'recycle_bin' && renderRecycleBin()}
+                    {view === 'help' && renderHelp()}
+                    {notification && (<div className="absolute bottom-10 left-1/2 transform -translate-x-1/2 bg-gray-800 dark:bg-white text-white dark:text-gray-900 px-4 py-2 rounded-full shadow-lg text-sm z-50 whitespace-nowrap">{notification}</div>)}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
